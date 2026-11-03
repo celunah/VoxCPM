@@ -41,8 +41,67 @@ def resolve_model_path(
     )
 
 
-def _split_long_text_for_tts(text: str, max_chars: int = 90) -> list[str]:
-    """Split long spoken text on natural punctuation while keeping chunks short."""
+_LONG_FORM_ABBREVIATIONS = {
+    "a.m.",
+    "approx.",
+    "dr.",
+    "e.g.",
+    "etc.",
+    "fig.",
+    "i.e.",
+    "inc.",
+    "jr.",
+    "ltd.",
+    "mr.",
+    "mrs.",
+    "ms.",
+    "no.",
+    "p.m.",
+    "ph.d.",
+    "prof.",
+    "sr.",
+    "u.k.",
+    "u.s.",
+    "vs.",
+}
+
+
+def _is_long_form_sentence_boundary(text: str, index: int) -> bool:
+    char = text[index]
+    if char in "。！？；":
+        return True
+    if char in "!?;":
+        return (
+            index + 1 == len(text)
+            or text[index + 1].isspace()
+            or text[index + 1] in "!?;"
+        )
+    if char != ".":
+        return False
+
+    if (
+        index > 0
+        and index + 1 < len(text)
+        and text[index - 1].isdigit()
+        and text[index + 1].isdigit()
+    ):
+        return False
+    if index + 1 < len(text) and not text[index + 1].isspace():
+        return False
+
+    token_match = re.search(r"(?:^|\s)(\S+)$", text[: index + 1])
+    token = token_match.group(1).lower() if token_match else text[: index + 1].lower()
+    if token in _LONG_FORM_ABBREVIATIONS or re.fullmatch(r"(?:[a-z]\.){1,4}", token):
+        return False
+    return True
+
+
+def _split_long_text_for_tts(text: str, max_chars: int = 55) -> list[str]:
+    """Split text at sentence, clause, or word boundaries when possible.
+
+    ``max_chars`` is a soft limit for a single unbroken Latin word, which is
+    kept intact instead of being split in the middle.
+    """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("target text must be a non-empty string")
     if max_chars <= 0:
@@ -53,38 +112,52 @@ def _split_long_text_for_tts(text: str, max_chars: int = 90) -> list[str]:
     if len(text) <= max_chars:
         return [text]
 
-    pieces = re.findall(r"[^。！？!?；;.]+[。！？!?；;.]?", text)
-    if not pieces:
-        pieces = [text]
-
     segments = []
-    current = ""
-    for piece in pieces:
-        piece = piece.strip()
-        if not piece:
-            continue
-        subpieces = [piece]
-        if len(piece) > max_chars:
-            subpieces = re.findall(r"[^，,、：:]+[，,、：:]?", piece) or [piece]
+    start = 0
+    word_pattern = re.compile(
+        r"[\"'“‘(\[]*[A-Za-z0-9]+(?:[.'’-][A-Za-z0-9]+)*"
+        r"[.!?;:,，、：；！？。\"'”’)\]]*"
+    )
 
-        for subpiece in subpieces:
-            subpiece = subpiece.strip()
-            while len(subpiece) > max_chars:
-                if current:
-                    segments.append(current)
-                    current = ""
-                segments.append(subpiece[:max_chars])
-                subpiece = subpiece[max_chars:].strip()
-            if not subpiece:
-                continue
-            if current and len(current) + len(subpiece) > max_chars:
-                segments.append(current)
-                current = subpiece
-            else:
-                current += subpiece
+    while start < len(text):
+        limit = min(start + max_chars, len(text))
+        if limit == len(text):
+            segments.append(text[start:].strip())
+            break
 
-    if current:
-        segments.append(current)
+        sentence_breaks = []
+        clause_breaks = []
+        whitespace_breaks = []
+        for index in range(start, limit):
+            if _is_long_form_sentence_boundary(text, index):
+                sentence_breaks.append(index + 1)
+            elif text[index] in "，,、：:":
+                clause_breaks.append(index + 1)
+            if index > start and text[index].isspace():
+                whitespace_breaks.append(index)
+
+        if sentence_breaks:
+            end = sentence_breaks[-1]
+        elif clause_breaks:
+            end = clause_breaks[-1]
+        elif whitespace_breaks:
+            end = whitespace_breaks[-1]
+        elif text[limit].isspace():
+            end = limit
+        else:
+            next_space = text.find(" ", limit)
+            token_end = next_space if next_space >= 0 else len(text)
+            token = text[start:token_end]
+            # If the limit lands inside one Latin word, keep that word whole.
+            end = token_end if word_pattern.fullmatch(token) else limit
+
+        segment = text[start:end].strip()
+        if segment:
+            segments.append(segment)
+        start = end
+        while start < len(text) and text[start].isspace():
+            start += 1
+
     return segments or [text]
 
 
@@ -275,16 +348,24 @@ class VoxCPM:
         voice_anchor_tail_size: int = 4,
         max_chars: int = 55,
         silence_ms: int = 180,
+        seed: Optional[int] = None,
     ) -> np.ndarray:
         """Generate long-form speech as short anchored segments.
 
         Later segments use the first generated segment as a fixed continuation
         prompt so long inputs do not rely on one very long autoregressive pass.
         An explicit external reference, when supplied, is kept as the stable
-        reference voice.
+        reference voice. The first segment is reused as the prompt for every
+        later segment, so increasing ``max_chars`` also increases the prompt
+        context size. ``denoise`` applies to external prompt/reference audio
+        used for the first segment; generated continuation audio is not denoised.
         """
+        if control and prompt_text and prompt_text.strip():
+            raise ValueError("control cannot be used together with prompt_text")
+
         segments = _split_long_text_for_tts(text, max_chars=max_chars)
         control = (control or "").strip()
+        control = re.sub(r"[()（）]", "", control).strip()
 
         first_text = f"({control}){segments[0]}" if control else segments[0]
 
@@ -297,6 +378,7 @@ class VoxCPM:
             "retry_badcase": retry_badcase,
             "retry_badcase_max_times": retry_badcase_max_times,
             "retry_badcase_ratio_threshold": retry_badcase_ratio_threshold,
+            "seed": seed,
             "voice_anchor_strength": voice_anchor_strength,
             "voice_anchor_tail_size": voice_anchor_tail_size,
         }

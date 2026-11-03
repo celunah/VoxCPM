@@ -210,13 +210,16 @@ sf.write("streaming.wav", wav, model.tts_model.sample_rate)
 #### 📖 Long-Form Generation
 
 For long scripts, `generate_long_form()` splits text into shorter segments and reuses the first generated segment as the
-stable prompt/reference anchor for later segments.
+stable prompt/reference anchor for later segments. It preserves word boundaries when possible, so an unusually long
+single word may exceed `max_chars`. The first segment is reused as the prompt for every later segment; increasing
+`max_chars` therefore increases both segment and prompt context size. `denoise=True` applies to external prompt or
+reference audio used for the first segment; generated continuation audio is not denoised.
 
 ```python
 wav = model.generate_long_form(
     text="First paragraph. Second paragraph. Third paragraph.",
     control="Warm, steady narrator voice",
-    max_chars=120,
+    max_chars=55,
     silence_ms=300,
 )
 sf.write("long_form.wav", wav, model.tts_model.sample_rate)
@@ -242,7 +245,7 @@ voxcpm design \
   --text "First paragraph. Second paragraph. Third paragraph." \
   --control "Warm, steady narrator voice" \
   --long-form \
-  --long-form-max-chars 120 \
+  --long-form-max-chars 55 \
   --output long_form.wav
 
 # Voice cloning (reference audio)

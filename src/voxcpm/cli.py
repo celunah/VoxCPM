@@ -73,6 +73,7 @@ def warn_legacy_mode():
 
 def build_final_text(text: str, control: str | None) -> str:
     control = (control or "").strip()
+    control = re.sub(r"[()（）]", "", control).strip()
     return f"({control}){text}" if control else text
 
 
@@ -255,6 +256,7 @@ def _run_single(args, parser, *, text: str, output: str, prompt_text: str | None
             cfg_value=args.cfg_value,
             inference_timesteps=args.inference_timesteps,
             normalize=args.normalize,
+            seed=args.seed,
             denoise=args.denoise
             and (args.prompt_audio is not None or args.reference_audio is not None),
             voice_anchor_strength=args.voice_anchor_strength,
@@ -352,19 +354,31 @@ def cmd_batch(args, parser):
     for i, text in enumerate(texts, 1):
         try:
             final_text = build_final_text(text, args.control)
-            audio_array = model.generate(
-                text=final_text,
-                prompt_wav_path=prompt_audio_path,
-                prompt_text=prompt_text,
-                reference_wav_path=reference_audio_path,
-                cfg_value=args.cfg_value,
-                inference_timesteps=args.inference_timesteps,
-                normalize=args.normalize,
-                denoise=args.denoise and (prompt_audio_path is not None or reference_audio_path is not None),
-                seed=args.seed,
-                voice_anchor_strength=args.voice_anchor_strength,
-                voice_anchor_tail_size=args.voice_anchor_tail_size,
+            denoise = args.denoise and (
+                prompt_audio_path is not None or reference_audio_path is not None
             )
+            common_kwargs = {
+                "prompt_wav_path": prompt_audio_path,
+                "prompt_text": prompt_text,
+                "reference_wav_path": reference_audio_path,
+                "cfg_value": args.cfg_value,
+                "inference_timesteps": args.inference_timesteps,
+                "normalize": args.normalize,
+                "denoise": denoise,
+                "voice_anchor_strength": args.voice_anchor_strength,
+                "voice_anchor_tail_size": args.voice_anchor_tail_size,
+            }
+            if args.long_form:
+                audio_array = model.generate_long_form(
+                    text=text,
+                    control=args.control,
+                    seed=args.seed,
+                    max_chars=args.long_form_max_chars,
+                    silence_ms=args.long_form_silence_ms,
+                    **common_kwargs,
+                )
+            else:
+                audio_array = model.generate(text=final_text, seed=args.seed, **common_kwargs)
 
             output_file = output_dir / f"output_{i:03d}.wav"
             sf.write(str(output_file), audio_array, model.tts_model.sample_rate)
@@ -451,6 +465,11 @@ def _add_common_generation_args(parser):
         default=None,
         help="Random seed for generation (default: None)",
     )
+    _add_long_form_args(parser)
+    _add_voice_anchor_args(parser)
+
+
+def _add_long_form_args(parser):
     parser.add_argument(
         "--long-form",
         action="store_true",
@@ -460,7 +479,7 @@ def _add_common_generation_args(parser):
         "--long-form-max-chars",
         type=int,
         default=55,
-        help="Maximum characters per long-form segment (default: 55)",
+        help="Target maximum characters per segment (long words may exceed it; default: 55)",
     )
     parser.add_argument(
         "--long-form-silence-ms",
@@ -468,6 +487,9 @@ def _add_common_generation_args(parser):
         default=180,
         help="Inserted silence between long-form segments in milliseconds (default: 180)",
     )
+
+
+def _add_voice_anchor_args(parser):
     parser.add_argument(
         "--voice-anchor-strength",
         type=float,
@@ -660,6 +682,8 @@ Examples:
         default=None,
         help="Random seed for generation (default: None)",
     )
+    _add_long_form_args(batch_parser)
+    _add_voice_anchor_args(batch_parser)
     _add_model_args(batch_parser)
     _add_lora_args(batch_parser)
     _add_timestamp_args(batch_parser, include_output=False)

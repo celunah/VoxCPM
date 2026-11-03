@@ -257,6 +257,8 @@ def _run_single(args, parser, *, text: str, output: str, prompt_text: str | None
             normalize=args.normalize,
             denoise=args.denoise
             and (args.prompt_audio is not None or args.reference_audio is not None),
+            voice_anchor_strength=args.voice_anchor_strength,
+            voice_anchor_tail_size=args.voice_anchor_tail_size,
             max_chars=args.long_form_max_chars,
             silence_ms=args.long_form_silence_ms,
         )
@@ -271,6 +273,8 @@ def _run_single(args, parser, *, text: str, output: str, prompt_text: str | None
             normalize=args.normalize,
             denoise=args.denoise
             and (args.prompt_audio is not None or args.reference_audio is not None),
+            voice_anchor_strength=args.voice_anchor_strength,
+            voice_anchor_tail_size=args.voice_anchor_tail_size,
         )
 
     import soundfile as sf
@@ -358,6 +362,8 @@ def cmd_batch(args, parser):
                 normalize=args.normalize,
                 denoise=args.denoise and (prompt_audio_path is not None or reference_audio_path is not None),
                 seed=args.seed,
+                voice_anchor_strength=args.voice_anchor_strength,
+                voice_anchor_tail_size=args.voice_anchor_tail_size,
             )
 
             output_file = output_dir / f"output_{i:03d}.wav"
@@ -461,6 +467,18 @@ def _add_common_generation_args(parser):
         type=int,
         default=180,
         help="Inserted silence between long-form segments in milliseconds (default: 180)",
+    )
+    parser.add_argument(
+        "--voice-anchor-strength",
+        type=float,
+        default=0.15,
+        help="Voice anchor blend strength (0–1, default: 0.15; 0 disables it)",
+    )
+    parser.add_argument(
+        "--voice-anchor-tail-size",
+        type=int,
+        default=4,
+        help="Number of tail latent frames used for the voice anchor (default: 4)",
     )
 
 

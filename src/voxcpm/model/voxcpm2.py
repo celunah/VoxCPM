@@ -785,6 +785,39 @@ class VoxCPM2Model(nn.Module):
         merged["mode"] = "ref_continuation" if "ref_audio_feat" in merged else "continuation"
         return merged
 
+    @staticmethod
+    def _build_voice_anchor_feat(prompt_cache: Optional[dict], tail_size: int = 4) -> Optional[torch.Tensor]:
+        """Build a stable speaker anchor from the tail of cached prompt features."""
+        if not prompt_cache:
+            return None
+
+        tail_size = max(1, int(tail_size))
+        anchors = []
+        for key in ("ref_audio_feat", "audio_feat"):
+            audio_feat = prompt_cache.get(key)
+            if audio_feat is None or audio_feat.numel() == 0:
+                continue
+            anchors.append(audio_feat[-tail_size:].mean(dim=0))
+
+        if not anchors:
+            return None
+
+        return torch.stack(anchors, dim=0).mean(dim=0).unsqueeze(0)
+
+    @staticmethod
+    def _blend_voice_anchor_condition(
+        prefix_feat_cond: torch.Tensor,
+        voice_anchor_feat: Optional[torch.Tensor],
+        strength: float,
+    ) -> torch.Tensor:
+        """Blend a fixed voice descriptor into the current decoder condition."""
+        strength = max(0.0, min(1.0, float(strength)))
+        if voice_anchor_feat is None or strength == 0.0:
+            return prefix_feat_cond
+
+        voice_anchor_feat = voice_anchor_feat.to(device=prefix_feat_cond.device, dtype=prefix_feat_cond.dtype)
+        return torch.lerp(prefix_feat_cond, voice_anchor_feat, strength)
+
     def generate_with_prompt_cache(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return next_and_close(self._generate_with_prompt_cache(*args, streaming=False, **kwargs))
 
@@ -808,6 +841,8 @@ class VoxCPM2Model(nn.Module):
         streaming: bool = False,
         streaming_prefix_len: int = 4,
         seed: Optional[int] = None,
+        voice_anchor_strength: float = 0.15,
+        voice_anchor_tail_size: int = 4,
     ) -> Generator[Tuple[torch.Tensor, torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """
         Generate audio using pre-built prompt cache.
@@ -825,6 +860,8 @@ class VoxCPM2Model(nn.Module):
             retry_badcase_ratio_threshold: Threshold for audio-to-text ratio
             streaming: Whether to return a generator of audio chunks
             streaming_prefix_len: Number of prefix audio patches to use for streaming mode
+            voice_anchor_strength: Blend strength for the cached voice anchor (0 disables it)
+            voice_anchor_tail_size: Number of tail latent frames used to build the anchor
 
         Returns:
             Generator of Tuple containing:
@@ -847,6 +884,13 @@ class VoxCPM2Model(nn.Module):
                 text = prompt_text + target_text
             else:
                 text = target_text
+
+        voice_anchor_strength = max(0.0, min(1.0, float(voice_anchor_strength)))
+        voice_anchor_feat = (
+            self._build_voice_anchor_feat(prompt_cache, voice_anchor_tail_size)
+            if voice_anchor_strength > 0.0
+            else None
+        )
 
         text_token = torch.LongTensor(self.text_tokenizer(text))
         text_token = torch.cat(
@@ -952,6 +996,8 @@ class VoxCPM2Model(nn.Module):
                 cfg_value=cfg_value,
                 streaming=streaming,
                 streaming_prefix_len=streaming_prefix_len,
+                voice_anchor_feat=voice_anchor_feat,
+                voice_anchor_strength=voice_anchor_strength,
             )
             if streaming:
                 with self.audio_vae.streaming_decode() as vae_dec:
@@ -1007,6 +1053,8 @@ class VoxCPM2Model(nn.Module):
         cfg_value: float = 2.0,
         streaming: bool = False,
         streaming_prefix_len: int = 4,
+        voice_anchor_feat: Optional[torch.Tensor] = None,
+        voice_anchor_strength: float = 0.15,
     ) -> Generator[Tuple[torch.Tensor, Union[torch.Tensor, List[torch.Tensor]]], None, None]:
         """Core inference method for audio generation.
 
@@ -1030,6 +1078,10 @@ class VoxCPM2Model(nn.Module):
                 - Predicted audio feature sequence so far as a List if ``streaming=True``, else as a concatenated Tensor
         """
         B, T, P, D = feat.shape
+
+        if voice_anchor_feat is not None:
+            voice_anchor_feat = voice_anchor_feat.to(device=feat.device, dtype=feat.dtype)
+        voice_anchor_strength = max(0.0, min(1.0, float(voice_anchor_strength)))
 
         prefill_encoder = getattr(self, "_feat_encoder_raw", self.feat_encoder)
         feat_embed = prefill_encoder(feat)  # [b, t, h_feat]
@@ -1085,10 +1137,15 @@ class VoxCPM2Model(nn.Module):
             dit_hidden_2 = self.res_to_dit_proj(residual_hidden)  # [b, h_dit]
             dit_hidden = torch.cat((dit_hidden_1, dit_hidden_2), dim=-1)
 
+            decoder_cond = self._blend_voice_anchor_condition(
+                prefix_feat_cond,
+                voice_anchor_feat,
+                voice_anchor_strength,
+            )
             pred_feat = self.feat_decoder(
                 mu=dit_hidden,
                 patch_size=self.patch_size,
-                cond=prefix_feat_cond.transpose(1, 2).contiguous(),
+                cond=decoder_cond.transpose(1, 2).contiguous(),
                 n_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
             ).transpose(

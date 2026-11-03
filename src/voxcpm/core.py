@@ -271,6 +271,8 @@ class VoxCPM:
         retry_badcase: bool = True,
         retry_badcase_max_times: int = 3,
         retry_badcase_ratio_threshold: float = 6.0,
+        voice_anchor_strength: float = 0.15,
+        voice_anchor_tail_size: int = 4,
         max_chars: int = 55,
         silence_ms: int = 180,
     ) -> np.ndarray:
@@ -295,6 +297,8 @@ class VoxCPM:
             "retry_badcase": retry_badcase,
             "retry_badcase_max_times": retry_badcase_max_times,
             "retry_badcase_ratio_threshold": retry_badcase_ratio_threshold,
+            "voice_anchor_strength": voice_anchor_strength,
+            "voice_anchor_tail_size": voice_anchor_tail_size,
         }
 
         if len(segments) == 1:
@@ -375,6 +379,8 @@ class VoxCPM:
         retry_badcase_ratio_threshold: float = 6.0,
         streaming: bool = False,
         seed: Optional[int] = None,
+        voice_anchor_strength: float = 0.15,
+        voice_anchor_tail_size: int = 4,
     ) -> Generator[np.ndarray, None, None]:
         """Synthesize speech for the given text and return a single waveform.
 
@@ -398,6 +404,8 @@ class VoxCPM:
             retry_badcase_ratio_threshold: Threshold for audio-to-text ratio.
             streaming: Whether to return a generator of audio chunks.
             seed: Optional random seed for reproducibility.
+            voice_anchor_strength: Blend strength for the VoxCPM2 voice anchor (0 disables it).
+            voice_anchor_tail_size: Number of tail latent frames used to build the anchor.
         Returns:
             Generator of numpy.ndarray: 1D waveform array (float32) on CPU.
             Yields audio chunks for each generation step if ``streaming=True``,
@@ -463,6 +471,14 @@ class VoxCPM:
                     self.text_normalizer = TextNormalizer()
                 text = self.text_normalizer.normalize(text)
 
+            voice_anchor_kwargs = (
+                {
+                    "voice_anchor_strength": voice_anchor_strength,
+                    "voice_anchor_tail_size": voice_anchor_tail_size,
+                }
+                if is_v2
+                else {}
+            )
             generate_result = self.tts_model._generate_with_prompt_cache(
                 target_text=text,
                 prompt_cache=fixed_prompt_cache,
@@ -475,6 +491,7 @@ class VoxCPM:
                 retry_badcase_ratio_threshold=retry_badcase_ratio_threshold,
                 streaming=streaming,
                 seed=seed,
+                **voice_anchor_kwargs,
             )
 
             if streaming:
